@@ -1,6 +1,7 @@
 use fluent_bundle::FluentValue;
+use minijinja::value::DynObject;
 use minijinja::value::Kwargs;
-use minijinja::Value;
+use minijinja::value::Value;
 //use serde_json::Value as Json;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -48,7 +49,12 @@ fn parse_language(arg: &str) -> crate::Result<LanguageIdentifier, Error> {
 }
 
 impl<L: Loader + Send + Sync> crate::FluentLoader<L> {
-    fn minijinja_call(&self, id: String, kwargs: Kwargs) -> Result<String, minijinja::Error> {
+    fn minijinja_call(
+        &self,
+        id: String,
+        object: Option<Value>,
+        kwargs: Kwargs,
+    ) -> Result<String, minijinja::Error> {
         let lang_arg = kwargs.get(LANG_KEY).ok().map(parse_language).transpose()?;
         let lang = lang_arg
             .as_ref()
@@ -56,24 +62,37 @@ impl<L: Loader + Send + Sync> crate::FluentLoader<L> {
             .ok_or(Error::NoLangArgument)?;
 
         /// Filters kwargs to exclude ones used by this function and tera.
-        fn is_not_tera_key(k: &&str) -> bool {
-            *k != LANG_KEY
+        fn is_not_tera_key(k: &str) -> bool {
+            k != LANG_KEY
         }
 
-        let mut fluent_args = HashMap::new();
+        let mut map = HashMap::new();
 
-        for key in kwargs.args().filter(is_not_tera_key) {
+        if let Some(o) = object.as_ref() {
+            for i in o.try_iter()? {
+                map.insert(
+                    i.as_str().unwrap().to_string(),
+                    value_to_fluent(&o.get_item(&i)?)?,
+                );
+            }
+        }
+        for key in kwargs.args() {
             let value = &kwargs.get(key)?;
-            fluent_args.insert(
-                Cow::from(heck::ToKebabCase::to_kebab_case(key)),
-                value_to_fluent(value)?,
-            );
+            map.insert(key.to_string(), value_to_fluent(value)?);
         }
+
+        let fluent_args: HashMap<_, _> = map
+            .into_iter()
+            .filter(|(k, v)| is_not_tera_key(k))
+            .map(|(k, v)| (Cow::from(heck::ToKebabCase::to_kebab_case(k.as_str())), v))
+            .collect();
 
         let response = self.loader.lookup_with_args(lang, &id, &fluent_args);
         Ok(response)
     }
-    pub fn into_minijinja_fn(self) -> impl Fn(String, Kwargs) -> Result<String, minijinja::Error> {
-        move |a, b| self.minijinja_call(a, b)
+    pub fn into_minijinja_fn(
+        self,
+    ) -> impl Fn(String, Option<Value>, Kwargs) -> Result<String, minijinja::Error> {
+        move |a, b, c| self.minijinja_call(a, b, c)
     }
 }
